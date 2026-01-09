@@ -14,6 +14,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
@@ -30,6 +31,30 @@ from grok.data import (
 from grok.transformer import Transformer
 from grok.measure import get_sharpness
 DEFAULT_LOG_DIR = "logs"
+
+class MLP(nn.Module):
+    def __init__(self, vocab_size, d_model, max_context_len, dropout=0.0, **kwargs):
+        super().__init__()
+        # 适配原有Transformer的输入输出逻辑：输入是 [batch, seq_len]，输出是 [batch, seq_len, vocab_size]
+        self.embedding = nn.Embedding(vocab_size, d_model)  # 复用原有embedding逻辑
+        self.fc1 = nn.Linear(d_model, d_model * 2)
+        self.fc2 = nn.Linear(d_model * 2, d_model)
+        self.fc3 = nn.Linear(d_model, vocab_size)  # 输出维度匹配vocab_size
+        self.dropout = nn.Dropout(dropout)
+        self.max_context_len = max_context_len
+
+    def forward(self, x, save_activations=False, **kwargs):
+        # x: [batch, seq_len]
+        embed = self.embedding(x)  # [batch, seq_len, d_model]
+        # MLP前向传播（保持和原有Transformer输出格式一致）
+        out = self.dropout(F.relu(self.fc1(embed)))
+        out = self.dropout(F.relu(self.fc2(out)))
+        out = self.fc3(out)  # [batch, seq_len, vocab_size]
+        
+        # 适配原有逻辑：返回 (输出, attentions, values)，后两者用None填充（原有逻辑不强制使用）
+        return out, None, None
+    
+
 class TrainableTransformer(LightningModule):
     """
     Adds training methods to train a generic transformer on arithmetic equations
@@ -45,16 +70,13 @@ class TrainableTransformer(LightningModule):
         self.save_hyperparameters(hparams)
         self.prepare_data()
 
-        self.transformer = Transformer(
-            hparams.n_layers,
-            hparams.n_heads,
-            hparams.d_model,
-            hparams.dropout,
-            hparams.max_context_len,
-            len(self.train_dataset.tokenizer),
-            hparams.non_linearity,
-            weight_noise=self.hparams.weight_noise,
+        self.transformer = MLP(
+            vocab_size=len(self.train_dataset.tokenizer),
+            d_model=hparams.d_model,
+            max_context_len=hparams.max_context_len,
+            dropout=hparams.dropout,
         )
+
         self.margin = torch.Tensor([0])
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
@@ -395,12 +417,10 @@ class TrainableTransformer(LightningModule):
         self.fwd_time_in_epoch += time.time() - start
 
         # schedulers = self.trainer.lr_schedulers[0]
-        # jmod schedulers = self.trainer.lr_schedulers[0]
         schedulers = self.lr_schedulers()
         if self.current_epoch != self.next_train_epoch_to_log:
             return {"loss": loss}
         # lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
-        # # jmod lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
         lr = schedulers.optimizer.param_groups[0]["lr"]
         output = {
             "loss": loss,
@@ -519,9 +539,9 @@ class TrainableTransformer(LightningModule):
                 # get the l2 norm of the parameter
                 logs["paramnorm_" + name] = torch.norm(
                     param, 2
-                # ).detach().cpu().numpy() / np.sqrt(n_params)
+                ).detach().cpu().numpy() / np.sqrt(n_params)
                 #jomod ).detach().cpu().numpy() / np.sqrt(n_params)
-                ).detach().cpu().numpy().astype(np.float32) / np.sqrt(n_params,dtype=np.float32)
+                # ).detach().cpu().numpy().astype(np.float32) / np.sqrt(n_params,dtype=np.float32)
 
             # train accuracy
             device = self.transformer.embedding.weight.device
@@ -601,12 +621,12 @@ def train(hparams: Namespace) -> None:
         hparams.logdir = os.environ.get("LOGDIR", ".")
     hparams.logdir = os.path.abspath(hparams.logdir)
     # Make sure d_model, heads, and d_key are compatible
-    assert (
-        hparams.d_model % hparams.n_heads == 0
-    ), "n_heads=%s does not evenly divide d_model=%s" % (
-        hparams.n_heads,
-        hparams.d_model,
-    )
+    # assert (
+    #     hparams.d_model % hparams.n_heads == 0
+    # ), "n_heads=%s does not evenly divide d_model=%s" % (
+    #     hparams.n_heads,
+    #     hparams.d_model,
+    # )
     hparams.d_key = hparams.d_model / hparams.n_heads
     # Set up the RNGs for repeatability
     if hparams.random_seed != -1:
@@ -642,6 +662,7 @@ def train(hparams: Namespace) -> None:
     if torch.cuda.is_available() and hparams.gpu >= 0:
         trainer_args["gpus"] = [hparams.gpu]
 
+    
     if torch.backends.mps.is_available() and hparams.gpu >= 0:
         trainer_args["accelerator"] = 'mps'
         trainer_args["devices"] = 1

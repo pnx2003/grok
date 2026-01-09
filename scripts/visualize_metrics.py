@@ -53,7 +53,7 @@ def load_expt_metrics(
     args = deepcopy(args)
 
     # load the hparams for this experiment
-    with open(f"{expt_dir}/default/version_0/hparams.yaml", "r") as fh:
+    with open(f"{expt_dir}/hparams.yaml", "r") as fh:
         hparams_dict = yaml.safe_load(fh)
 
     for k, v in hparams_dict.items():
@@ -74,7 +74,7 @@ def load_expt_metrics(
         "learning_rate": [],
     }
 
-    with open(f"{expt_dir}/default/version_0/metrics.csv", "r") as fh:
+    with open(f"{expt_dir}/metrics.csv", "r") as fh:
         for row in csv.DictReader(fh):
             if row["train_loss"] != "":
                 for k in train_data:
@@ -460,6 +460,7 @@ def get_max_epochs(metric_data):
 rundir = args.input_dir
 
 try:
+    import pdb;pdb.set_trace()
     metric_data = load_run_metrics(rundir, args)
     arch = get_arch(metric_data)
     operation = get_operation(metric_data)

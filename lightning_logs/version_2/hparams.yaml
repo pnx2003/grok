@@ -1,6 +1,6 @@
 anneal_lr: false
 anneal_lr_steps: 100000
-batchsize: 0
+batchsize: 512.0
 checkpoint_path: /data0/pnx/hw/grok/checkpoints
 d_key: 32.0
 d_model: 128

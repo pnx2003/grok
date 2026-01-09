@@ -21,7 +21,7 @@ operand_length: null
 random_seed: -1
 save_activations: false
 save_outputs: false
-train_data_pct: 20.0
+train_data_pct: 50.0
 warmup_steps: 10
 weight_decay: 0
 weight_decay_kind: to_zero

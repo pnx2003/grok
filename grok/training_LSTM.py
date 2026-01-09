@@ -14,6 +14,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
@@ -30,6 +31,53 @@ from grok.data import (
 from grok.transformer import Transformer
 from grok.measure import get_sharpness
 DEFAULT_LOG_DIR = "logs"
+
+class LSTMModel(nn.Module):
+    """替换Transformer的LSTM模型，保持输入输出接口兼容"""
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int = 128,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.0,
+        max_context_len: int = 50,
+        weight_noise: float = 0.0  # 兼容原参数，暂不实现
+    ):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(
+            input_size=embed_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_dim, vocab_size)
+        self.dropout = nn.Dropout(dropout)
+        self.max_context_len = max_context_len
+
+    def forward(self, x: Tensor, save_activations: bool = False) -> Tuple[Tensor, List, List]:
+        """
+        保持和原Transformer.forward一致的返回格式：
+        :param x: 输入序列 (batch_size, max_context_len)
+        :param save_activations: 兼容原参数，返回空的attention/values
+        :return: (输出logits, 空attention列表, 空values列表)
+        """
+        # 嵌入层
+        x_emb = self.dropout(self.embedding(x))  # (batch, seq_len, embed_dim)
+        # LSTM前向
+        lstm_out, _ = self.lstm(x_emb)  # (batch, seq_len, hidden_dim)
+        lstm_out = self.dropout(lstm_out)
+        # 映射到词汇表维度
+        logits = self.fc(lstm_out)  # (batch, seq_len, vocab_size)
+        
+        # 兼容原Transformer返回格式（attention/values用于保存激活，LSTM无此结构，返回空）
+        attentions = []
+        values = []
+        return logits, attentions, values
+    
+
 class TrainableTransformer(LightningModule):
     """
     Adds training methods to train a generic transformer on arithmetic equations
@@ -45,16 +93,16 @@ class TrainableTransformer(LightningModule):
         self.save_hyperparameters(hparams)
         self.prepare_data()
 
-        self.transformer = Transformer(
-            hparams.n_layers,
-            hparams.n_heads,
-            hparams.d_model,
-            hparams.dropout,
-            hparams.max_context_len,
-            len(self.train_dataset.tokenizer),
-            hparams.non_linearity,
-            weight_noise=self.hparams.weight_noise,
+        self.transformer = LSTMModel(  # 原：Transformer(...)
+            vocab_size=len(self.train_dataset.tokenizer),
+            embed_dim=hparams.d_model,
+            hidden_dim=hparams.d_model,  # 复用d_model作为hidden_dim
+            num_layers=hparams.n_layers,
+            dropout=hparams.dropout,
+            max_context_len=hparams.max_context_len,
+            weight_noise=hparams.weight_noise
         )
+
         self.margin = torch.Tensor([0])
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
@@ -395,12 +443,10 @@ class TrainableTransformer(LightningModule):
         self.fwd_time_in_epoch += time.time() - start
 
         # schedulers = self.trainer.lr_schedulers[0]
-        # jmod schedulers = self.trainer.lr_schedulers[0]
         schedulers = self.lr_schedulers()
         if self.current_epoch != self.next_train_epoch_to_log:
             return {"loss": loss}
         # lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
-        # # jmod lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
         lr = schedulers.optimizer.param_groups[0]["lr"]
         output = {
             "loss": loss,
@@ -519,9 +565,9 @@ class TrainableTransformer(LightningModule):
                 # get the l2 norm of the parameter
                 logs["paramnorm_" + name] = torch.norm(
                     param, 2
-                # ).detach().cpu().numpy() / np.sqrt(n_params)
+                ).detach().cpu().numpy() / np.sqrt(n_params)
                 #jomod ).detach().cpu().numpy() / np.sqrt(n_params)
-                ).detach().cpu().numpy().astype(np.float32) / np.sqrt(n_params,dtype=np.float32)
+                # ).detach().cpu().numpy().astype(np.float32) / np.sqrt(n_params,dtype=np.float32)
 
             # train accuracy
             device = self.transformer.embedding.weight.device
@@ -601,12 +647,12 @@ def train(hparams: Namespace) -> None:
         hparams.logdir = os.environ.get("LOGDIR", ".")
     hparams.logdir = os.path.abspath(hparams.logdir)
     # Make sure d_model, heads, and d_key are compatible
-    assert (
-        hparams.d_model % hparams.n_heads == 0
-    ), "n_heads=%s does not evenly divide d_model=%s" % (
-        hparams.n_heads,
-        hparams.d_model,
-    )
+    # assert (
+    #     hparams.d_model % hparams.n_heads == 0
+    # ), "n_heads=%s does not evenly divide d_model=%s" % (
+    #     hparams.n_heads,
+    #     hparams.d_model,
+    # )
     hparams.d_key = hparams.d_model / hparams.n_heads
     # Set up the RNGs for repeatability
     if hparams.random_seed != -1:
@@ -642,6 +688,7 @@ def train(hparams: Namespace) -> None:
     if torch.cuda.is_available() and hparams.gpu >= 0:
         trainer_args["gpus"] = [hparams.gpu]
 
+    
     if torch.backends.mps.is_available() and hparams.gpu >= 0:
         trainer_args["accelerator"] = 'mps'
         trainer_args["devices"] = 1

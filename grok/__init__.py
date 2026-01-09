@@ -3,3 +3,4 @@ from . import data
 from . import training
 from . import metrics
 from . import visualization
+from . import training_LSTM
